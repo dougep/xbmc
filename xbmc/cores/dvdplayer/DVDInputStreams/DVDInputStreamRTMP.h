@@ -21,12 +21,19 @@
 
 #ifdef HAS_LIBRTMP
 
+#include <deque>
+
+#include "threads/Timer.h"
+
 #include "DVDInputStream.h"
 #include "DllLibRTMP.h"
+
+#define MAX_STORED_BYTES 32000 * 60
 
 class CDVDInputStreamRTMP 
   : public CDVDInputStream
   , public CDVDInputStream::ISeekTime
+  , public ITimerCallback
 {
 public:
   CDVDInputStreamRTMP();
@@ -40,9 +47,14 @@ public:
   virtual bool    IsEOF();
   virtual int64_t GetLength();
 
-  CCriticalSection m_RTMPSection;
+  virtual void    OnTimeout();
 
 protected:
+          void    ClearReadBuffer();
+          void    SetRTMPSocketBlocking(bool blocking);
+
+protected:
+  CCriticalSection m_RTMPSection;
   bool       m_eof;
   bool       m_bPaused;
   char*      m_sStreamPlaying;
@@ -50,6 +62,9 @@ protected:
 
   RTMP       *m_rtmp;
   DllLibRTMP m_libRTMP;
+
+  CTimer     m_pauseKeepAliveTimer;
+  int        m_keepAliveCount;
 };
 
 #endif

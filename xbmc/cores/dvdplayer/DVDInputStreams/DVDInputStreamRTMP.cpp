@@ -63,7 +63,9 @@ extern "C"
   }
 }
 
-CDVDInputStreamRTMP::CDVDInputStreamRTMP() : CDVDInputStream(DVDSTREAM_TYPE_RTMP)
+CDVDInputStreamRTMP::CDVDInputStreamRTMP() 
+  : CDVDInputStream(DVDSTREAM_TYPE_RTMP),
+    m_pauseKeepAliveTimer(this)
 {
   if (m_libRTMP.Load())
   {
@@ -190,9 +192,16 @@ void CDVDInputStreamRTMP::Close()
 
 int CDVDInputStreamRTMP::Read(uint8_t* buf, int buf_size)
 {
-  int i = m_libRTMP.Read(m_rtmp, (char *)buf, buf_size);
+  CSingleLock lock(m_RTMPSection);
+
+  int i;
+
+  i = m_libRTMP.Read(m_rtmp, (char *)buf, buf_size);
+
   if (i < 0)
     m_eof = true;
+
+  CLog::Log(LOGNOTICE, "RTMP Read timestamp %d", m_rtmp->m_channelTimestamp[m_rtmp->m_mediaChannel]);
 
   return i;
 }
@@ -229,8 +238,76 @@ bool CDVDInputStreamRTMP::Pause(double dTime)
 
   CLog::Log(LOGNOTICE, "RTMP Pause %s requested", m_bPaused ? "TRUE" : "FALSE");
 
-  m_libRTMP.Pause(m_rtmp, m_bPaused);
+  if (m_bPaused)
+  {
+    m_libRTMP.Pause(m_rtmp, m_bPaused);
+
+    m_keepAliveCount = 0;
+    m_pauseKeepAliveTimer.Start(250, true);
+
+    ClearReadBuffer();
+  }
+  else
+  {
+    m_pauseKeepAliveTimer.Stop();
+    ClearReadBuffer();
+
+    m_libRTMP.Pause(m_rtmp, m_bPaused);
+  }
 
   return true;
 }
+
+void CDVDInputStreamRTMP::OnTimeout()
+{
+  CSingleLock lock(m_RTMPSection);
+
+  if (++m_keepAliveCount == 6000)
+  {
+    m_keepAliveCount = 0;
+    m_libRTMP.Pause(m_rtmp, false);
+    m_libRTMP.Pause(m_rtmp, true);
+
+    CLog::Log(LOGNOTICE, "RTMP Pause keep-alive unpausing, repausing stream");
+  }
+
+  ClearReadBuffer();
+}
+
+void CDVDInputStreamRTMP::ClearReadBuffer()
+{
+  // Clear out all buffered and in-flight data
+  char buf[500000];
+  int bytes;
+
+  CLog::Log(LOGNOTICE, "RTMP ClearReadBuffer");
+
+  SetRTMPSocketBlocking(false);
+  do
+  {
+    Sleep(25);
+    bytes = recv(m_rtmp->m_sb.sb_socket, buf, 500000, 0);
+    m_rtmp->m_sb.sb_size = 0;
+    m_rtmp->m_sb.sb_start = m_rtmp->m_sb.sb_buf;
+    if (bytes > 0)
+      CLog::Log(LOGNOTICE, "RTMP Dumping %d bytes", bytes);
+  }
+  while (bytes > 0);
+  SetRTMPSocketBlocking(true);
+}
+
+void CDVDInputStreamRTMP::SetRTMPSocketBlocking(bool blocking)
+{
+#ifdef TARGET_WINDOWS
+  u_long nonblocking = blocking ? 0 : 1;
+  ioctlsocket(m_rtmp->m_sb.sb_socket, FIONBIO, &nonblocking);
+#else
+  if (blocking)
+    fcntl(soc, F_SETFL, fcntl(soc, F_GETFL) | O_NONBLOCK);
+  else
+    fcntl(soc, F_SETFL, fcntl(soc, F_GETFL) & ~O_NONBLOCK);
+#endif
+}
+
+
 #endif
